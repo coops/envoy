@@ -240,33 +240,18 @@ void Utility::throwWithMalformedIp(absl::string_view ip_address) {
 Address::InstanceConstSharedPtr Utility::getLocalAddress(const Address::IpVersion version) {
   Address::InstanceConstSharedPtr ret;
   if (Api::OsSysCallsSingleton::get().supportsGetifaddrs()) {
-    struct ifaddrs* ifaddr;
-    struct ifaddrs* ifa;
+    Api::InterfaceAddressVector interface_addresses{};
 
-    const Api::SysCallIntResult rc = Api::OsSysCallsSingleton::get().getifaddrs(&ifaddr);
+    const Api::SysCallIntResult rc =
+        Api::OsSysCallsSingleton::get().getifaddrs(interface_addresses);
     RELEASE_ASSERT(!rc.return_value_, fmt::format("getiffaddrs error: {}", rc.errno_));
 
     // man getifaddrs(3)
-    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-      if (ifa->ifa_addr == nullptr) {
-        continue;
+    for (const auto& interface_address : interface_addresses) {
+      if (!isLoopbackAddress(*interface_address.interface_addr_)) {
+        ret = interface_address.interface_addr_;
+        break;
       }
-
-      if ((ifa->ifa_addr->sa_family == AF_INET && version == Address::IpVersion::v4) ||
-          (ifa->ifa_addr->sa_family == AF_INET6 && version == Address::IpVersion::v6)) {
-        const struct sockaddr_storage* addr =
-            reinterpret_cast<const struct sockaddr_storage*>(ifa->ifa_addr);
-        ret = Address::addressFromSockAddrOrThrow(*addr, (version == Address::IpVersion::v4)
-                                                             ? sizeof(sockaddr_in)
-                                                             : sizeof(sockaddr_in6));
-        if (!isLoopbackAddress(*ret)) {
-          break;
-        }
-      }
-    }
-
-    if (ifaddr) {
-      Api::OsSysCallsSingleton::get().freeifaddrs(ifaddr);
     }
   }
 
@@ -534,6 +519,9 @@ Utility::protobufAddressSocketType(const envoy::config::core::v3::Address& proto
     }
   }
   case envoy::config::core::v3::Address::AddressCase::kPipe:
+    return Socket::Type::Stream;
+  case envoy::config::core::v3::Address::AddressCase::kEnvoyInternalAddress:
+    // Currently internal address supports stream operation only.
     return Socket::Type::Stream;
   default:
     NOT_REACHED_GCOVR_EXCL_LINE;

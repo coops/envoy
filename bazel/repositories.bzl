@@ -115,10 +115,6 @@ def _python_deps():
         name = "com_github_twitter_common_finagle_thrift",
         build_file = "@envoy//bazel/external:twitter_common_finagle_thrift.BUILD",
     )
-    external_http_archive(
-        name = "six",
-        build_file = "@com_google_protobuf//third_party:six.BUILD",
-    )
 
 # Bazel native C++ dependencies. For the dependencies that doesn't provide autoconf/automake builds.
 def _cc_deps():
@@ -234,6 +230,7 @@ def envoy_dependencies(skip_targets = []):
     )
     external_http_archive("rules_cc")
     external_http_archive("rules_pkg")
+    _com_github_fdio_vpp_vcl()
 
     # Unconditional, since we use this only for compiler-agnostic fuzzing utils.
     _org_llvm_releases_compiler_rt()
@@ -812,10 +809,15 @@ def _com_github_google_quiche():
         name = "com_github_google_quiche",
         genrule_cmd_file = "@envoy//bazel/external:quiche.genrule_cmd",
         build_file = "@envoy//bazel/external:quiche.BUILD",
+        patches = ["@envoy//bazel/external:quiche.patch"],
     )
     native.bind(
         name = "quiche_common_platform",
         actual = "@com_github_google_quiche//:quiche_common_platform",
+    )
+    native.bind(
+        name = "quiche_http2_adapter",
+        actual = "@com_github_google_quiche//:http2_adapter",
     )
     native.bind(
         name = "quiche_http2_platform",
@@ -1101,6 +1103,13 @@ filegroup(
     external_http_archive(
         name = "kafka_python_client",
         build_file_content = BUILD_ALL_CONTENT,
+    )
+
+def _com_github_fdio_vpp_vcl():
+    external_http_archive(
+        name = "com_github_fdio_vpp_vcl",
+        build_file_content = BUILD_ALL_CONTENT,
+        patches = ["@envoy//bazel/foreign_cc:vpp_vcl.patch"],
     )
 
 def _foreign_cc_dependencies():

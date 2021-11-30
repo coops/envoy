@@ -178,7 +178,9 @@ constexpr bool win32SupportsOriginalDestination() {
 #include <ifaddrs.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#if !defined(DO_NOT_INCLUDE_NETINET_TCP_H)
 #include <netinet/tcp.h>
+#endif
 #include <netinet/udp.h> // for UDP_GRO
 #include <sys/ioctl.h>
 #include <sys/mman.h> // for mode_t
@@ -203,6 +205,8 @@ constexpr bool win32SupportsOriginalDestination() {
 #define be16toh(x) OSSwapBigToHostInt16((x))
 #define be32toh(x) OSSwapBigToHostInt32((x))
 #define be64toh(x) OSSwapBigToHostInt64((x))
+
+#undef TRUE
 #else
 #include <endian.h>
 #endif
@@ -228,6 +232,10 @@ constexpr bool win32SupportsOriginalDestination() {
 
 #ifndef UDP_SEGMENT
 #define UDP_SEGMENT 103
+#endif
+
+#ifndef IPPROTO_MPTCP
+#define IPPROTO_MPTCP 262
 #endif
 
 typedef int os_fd_t;            // NOLINT(modernize-use-using)
@@ -290,20 +298,6 @@ constexpr absl::string_view null_device_path{"/dev/null"};
 struct mmsghdr {
   struct msghdr msg_hdr;
   unsigned int msg_len;
-};
-#endif
-
-// https://android.googlesource.com/platform/prebuilts/ndk/+/dev/platform/sysroot/usr/include/ifaddrs.h
-#if defined(WIN32) || (defined(__ANDROID_API__) && __ANDROID_API__ < 24)
-// Posix structure necessary for getifaddrs definition.
-struct ifaddrs {
-  struct ifaddrs* ifa_next;
-  char* ifa_name;
-  unsigned int ifa_flags;
-  struct sockaddr* ifa_addr;
-  struct sockaddr* ifa_netmask;
-  struct sockaddr* ifa_dstaddr;
-  void* ifa_data;
 };
 #endif
 

@@ -20,6 +20,7 @@
 #include "envoy/server/bootstrap_extension_config.h"
 #include "envoy/server/instance.h"
 #include "envoy/server/options.h"
+#include "envoy/stats/histogram.h"
 #include "envoy/stats/stats.h"
 #include "envoy/upstream/cluster_manager.h"
 
@@ -31,12 +32,14 @@
 #include "source/common/config/grpc_mux_impl.h"
 #include "source/common/config/new_grpc_mux_impl.h"
 #include "source/common/config/utility.h"
+#include "source/common/config/xds_mux/grpc_mux_impl.h"
 #include "source/common/config/xds_resource.h"
 #include "source/common/http/codes.h"
 #include "source/common/http/headers.h"
 #include "source/common/local_info/local_info_impl.h"
 #include "source/common/memory/stats.h"
 #include "source/common/network/address_impl.h"
+#include "source/common/network/dns_resolver/dns_factory_util.h"
 #include "source/common/network/socket_interface.h"
 #include "source/common/network/socket_interface_impl.h"
 #include "source/common/network/tcp_listener_impl.h"
@@ -166,7 +169,7 @@ void InstanceImpl::failHealthcheck(bool fail) {
 }
 
 MetricSnapshotImpl::MetricSnapshotImpl(Stats::Store& store, TimeSource& time_source) {
-  store.forEachCounter(
+  store.forEachSinkedCounter(
       [this](std::size_t size) mutable {
         snapped_counters_.reserve(size);
         counters_.reserve(size);
@@ -176,7 +179,7 @@ MetricSnapshotImpl::MetricSnapshotImpl(Stats::Store& store, TimeSource& time_sou
         counters_.push_back({counter.latch(), counter});
       });
 
-  store.forEachGauge(
+  store.forEachSinkedGauge(
       [this](std::size_t size) mutable {
         snapped_gauges_.reserve(size);
         gauges_.reserve(size);
@@ -193,7 +196,7 @@ MetricSnapshotImpl::MetricSnapshotImpl(Stats::Store& store, TimeSource& time_sou
     histograms_.push_back(*histogram);
   }
 
-  store.forEachTextReadout(
+  store.forEachSinkedTextReadout(
       [this](std::size_t size) mutable {
         snapped_text_readouts_.reserve(size);
         text_readouts_.reserve(size);
@@ -395,7 +398,7 @@ void InstanceImpl::initialize(Network::Address::InstanceConstSharedPtr local_add
 
   // Needs to happen as early as possible in the instantiation to preempt the objects that require
   // stats.
-  stats_store_.setTagProducer(Config::Utility::createTagProducer(bootstrap_));
+  stats_store_.setTagProducer(Config::Utility::createTagProducer(bootstrap_, options_.statsTags()));
   stats_store_.setStatsMatcher(
       Config::Utility::createStatsMatcher(bootstrap_, stats_store_.symbolTable()));
   stats_store_.setHistogramSettings(Config::Utility::createHistogramSettings(bootstrap_));
@@ -485,7 +488,8 @@ void InstanceImpl::initialize(Network::Address::InstanceConstSharedPtr local_add
     // This is needed so that we don't read the value until runtime is fully initialized.
     enable_reuse_port_default_ = ReusePortDefault::Runtime;
   }
-  admin_ = std::make_unique<AdminImpl>(initial_config.admin().profilePath(), *this);
+  admin_ = std::make_unique<AdminImpl>(initial_config.admin().profilePath(), *this,
+                                       initial_config.admin().ignoreGlobalConnLimit());
 
   loadServerFlags(initial_config.flagsPath());
 
@@ -593,23 +597,11 @@ void InstanceImpl::initialize(Network::Address::InstanceConstSharedPtr local_add
   // Once we have runtime we can initialize the SSL context manager.
   ssl_context_manager_ = createContextManager("ssl_context_manager", time_source_);
 
-  envoy::config::core::v3::DnsResolverOptions dns_resolver_options;
-  std::vector<Network::Address::InstanceConstSharedPtr> resolvers;
-  if (bootstrap_.has_dns_resolution_config()) {
-    dns_resolver_options.CopyFrom(bootstrap_.dns_resolution_config().dns_resolver_options());
-    if (!bootstrap_.dns_resolution_config().resolvers().empty()) {
-      const auto& resolver_addrs = bootstrap_.dns_resolution_config().resolvers();
-      resolvers.reserve(resolver_addrs.size());
-      for (const auto& resolver_addr : resolver_addrs) {
-        resolvers.push_back(Network::Address::resolveProtoAddress(resolver_addr));
-      }
-    }
-  } else {
-    // Field bool `use_tcp_for_dns_lookups` will be deprecated in future. To be backward compatible
-    // utilize bootstrap_.use_tcp_for_dns_lookups() if `bootstrap_.dns_resolver_options` is not set.
-    dns_resolver_options.set_use_tcp_for_dns_lookups(bootstrap_.use_tcp_for_dns_lookups());
-  }
-  dns_resolver_ = dispatcher_->createDnsResolver(resolvers, dns_resolver_options);
+  envoy::config::core::v3::TypedExtensionConfig typed_dns_resolver_config;
+  Network::DnsResolverFactory& dns_resolver_factory =
+      Network::createDnsResolverFactoryFromProto(bootstrap_, typed_dns_resolver_config);
+  dns_resolver_ =
+      dns_resolver_factory.createDnsResolver(dispatcher(), api(), typed_dns_resolver_config);
 
   cluster_manager_factory_ = std::make_unique<Upstream::ProdClusterManagerFactory>(
       *admin_, Runtime::LoaderSingleton::get(), stats_store_, thread_local_, dns_resolver_,
@@ -860,6 +852,8 @@ void InstanceImpl::terminate() {
   // TODO: figure out the correct fix: https://github.com/envoyproxy/envoy/issues/15072.
   Config::GrpcMuxImpl::shutdownAll();
   Config::NewGrpcMuxImpl::shutdownAll();
+  Config::XdsMux::GrpcMuxSotw::shutdownAll();
+  Config::XdsMux::GrpcMuxDelta::shutdownAll();
 
   if (overload_manager_) {
     overload_manager_->stop();
@@ -928,7 +922,7 @@ InstanceImpl::registerCallback(Stage stage, StageCallbackWithCompletion callback
 }
 
 void InstanceImpl::notifyCallbacksForStage(Stage stage, Event::PostCb completion_cb) {
-  ASSERT(Thread::MainThread::isMainOrTestThread());
+  ASSERT_IS_MAIN_OR_TEST_THREAD();
   const auto it = stage_callbacks_.find(stage);
   if (it != stage_callbacks_.end()) {
     for (const StageCallback& callback : it->second) {
